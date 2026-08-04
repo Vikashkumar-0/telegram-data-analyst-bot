@@ -183,35 +183,13 @@ def run_agent(history, log_fn, max_steps: int = 12):
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
 
-    candidate_models = list(config.GEMINI_FALLBACK_MODELS)
-
     for step in range(max_steps):
-        response = None
-        last_exception = None
+        response = client.models.generate_content(
+            model=config.GEMINI_MODEL,
+            contents=contents,
+            config=gen_config,
+        )
 
-        for model_name in candidate_models:
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=contents,
-                    config=gen_config,
-                )
-                break
-            except Exception as e:
-                last_exception = e
-                log_fn(
-                    {
-                        "event": "model_error",
-                        "step": step,
-                        "failed_model": model_name,
-                        "error": str(e),
-                    }
-                )
-
-        if response is None:
-            raise RuntimeError(
-                f"All model calls failed (tried {candidate_models}). Last error: {last_exception}"
-            ) from last_exception
 
         candidate_content = response.candidates[0].content
         contents.append(candidate_content)

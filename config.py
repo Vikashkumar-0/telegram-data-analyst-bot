@@ -32,16 +32,8 @@ TELEGRAM_BOT_TOKEN = _require("TELEGRAM_BOT_TOKEN")
 
 # Gemini's free tier needs no credit card -- console: aistudio.google.com/apikey
 GEMINI_API_KEY = _require("GEMINI_API_KEY")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 
-# Fallback models in order if GEMINI_MODEL fails (e.g. rate limit, deprecation)
-raw_fallbacks = os.environ.get(
-    "GEMINI_FALLBACK_MODELS",
-    "gemini-2.0-flash,gemini-2.0-flash-lite,gemini-1.5-flash,gemini-flash-latest",
-)
-GEMINI_FALLBACK_MODELS = [m.strip() for m in raw_fallbacks.split(",") if m.strip()]
-if GEMINI_MODEL not in GEMINI_FALLBACK_MODELS:
-    GEMINI_FALLBACK_MODELS.insert(0, GEMINI_MODEL)
 
 # Optional but recommended: free web search built for LLM agents, 1,000
 # searches/month free, no credit card -- tavily.com. If unset, the agent
@@ -57,4 +49,3 @@ PUBLIC_BASE_URL = _require("PUBLIC_BASE_URL", fallback_env="BASE_URL").rstrip("/
 
 LOG_DIR = os.environ.get("LOG_DIR", "logs")
 PORT = int(os.environ.get("PORT", 8000))
-
