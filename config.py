@@ -32,7 +32,18 @@ TELEGRAM_BOT_TOKEN = _require("TELEGRAM_BOT_TOKEN")
 
 # Gemini's free tier needs no credit card -- console: aistudio.google.com/apikey
 GEMINI_API_KEY = _require("GEMINI_API_KEY")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
+
+# The free tier only allows a handful of requests per minute (check your
+# live number at aistudio.google.com/rate-limit), and one question can
+# trigger several Gemini calls in a row (search -> download -> analyze ->
+# answer). So instead of firing calls as fast as possible and tripping that
+# limit, agent.py waits at least this many seconds between calls.
+GEMINI_MIN_INTERVAL_SECONDS = float(os.environ.get("GEMINI_MIN_INTERVAL_SECONDS", 5))
+
+# If we still hit a 429 (quota exceeded) despite pacing, wait this long once
+# and try that one call again. Just one polite retry -- not a retry storm.
+GEMINI_RATE_LIMIT_RETRY_SECONDS = float(os.environ.get("GEMINI_RATE_LIMIT_RETRY_SECONDS", 10))
 
 
 # Optional but recommended: free web search built for LLM agents, 1,000
