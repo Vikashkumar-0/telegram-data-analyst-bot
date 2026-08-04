@@ -168,7 +168,7 @@ def _history_to_contents(history):
     ]
 
 
-def run_agent(history, log_fn, max_steps: int = 12):
+def run_agent(history, log_fn, max_steps: int = 6):
     """
     history: running conversation for this chat, oldest first, as
              {"role": "user"|"model", "text": str} dicts.
