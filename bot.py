@@ -51,7 +51,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         raw_answer = run_agent(history, run_logger.log)
-        history.append({"role": "model", "text": raw_answer or ""})
+        history.append({"role": "assistant", "text": raw_answer or ""})
         answer_value = extract_answer_value(raw_answer)
         run_logger.log({"event": "final_answer", "answer": answer_value})
     except Exception as e:

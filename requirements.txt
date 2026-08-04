@@ -1,5 +1,5 @@
 python-telegram-bot>=21.4
-google-genai>=2.16.0
+openai>=1.50.0
 tavily-python>=0.7.27
 requests>=2.32.3
 pandas>=2.2.2
@@ -9,4 +9,3 @@ fastapi>=0.115.0
 uvicorn[standard]>=0.30.6
 pytest>=8.3.2
 python-dotenv>=1.0.1
-

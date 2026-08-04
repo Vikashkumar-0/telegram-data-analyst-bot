@@ -52,23 +52,24 @@ storage account to set up — your host's public URL for this app *is* your
 | File | What it does |
 |---|---|
 | `bot.py` | FastAPI app: starts Telegram polling, handles messages, serves `/logs/<chat_id>.jsonl` |
-| `agent.py` | The reasoning loop: calls Gemini, runs whichever tool it requests, repeats until it has a final answer |
+| `agent.py` | The reasoning loop: calls the LLM (Groq), runs whichever tool it requests, repeats until it has a final answer |
 | `data_tools.py` | `download_file`, `load_tabular`, `preview` — the actual "fetch and understand a dataset" logic |
 | `logger.py` | Appends structured JSONL events to disk as they happen |
 | `config.py` | Reads and validates all environment variables in one place |
 | `utils.py` | `extract_answer_value` — pulls a clean JSON value out of the model's final text, even if it added stray formatting |
 | `tests/test_agent.py` | Unit tests for `utils.py` and `data_tools.py` (no API key or network needed) |
+| `tests/test_agent_e2e.py` | End-to-end tests of the whole agent loop — multi-step tool calling, rate-limit retry, max-steps fallback — against a mocked Groq client (no real API key or network needed) |
 
 ## 1. Get your credentials
 
 | What | How | Cost |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | Message `@BotFather` on Telegram → `/newbot` → pick a name ending in `bot` | free |
-| `GEMINI_API_KEY` | aistudio.google.com/apikey — no credit card needed | free tier (Flash models) |
+| `GROQ_API_KEY` | console.groq.com/keys — no credit card needed | free tier |
 | `TAVILY_API_KEY` | tavily.com — sign up, copy the key. Optional but recommended: without it, the model has no `web_search` tool and can only work from URLs already in the question | free, 1,000 searches/month |
 | `PUBLIC_BASE_URL` | filled in *after* you deploy (step 4) — the URL your host gives you | — |
 
-**On free-tier limits:** Gemini's Flash models are ~15 requests/minute and roughly 1,000–1,500 requests/day on the free tier as of mid-2026 — plenty for this project, but these numbers do change, so check ai.google.dev/gemini-api/docs/pricing if you hit 429 errors. Tavily's free tier is 1,000 searches/month, no card required. Neither needs billing enabled to work.
+**On free-tier limits:** Groq's free tier for `openai/gpt-oss-120b` is ~30 requests/minute as of mid-2026 — plenty for this project, but these numbers do change, so check console.groq.com/settings/limits if you hit 429 errors. Tavily's free tier is 1,000 searches/month, no card required. Neither needs billing enabled to work.
 
 Copy `.env.example` to `.env` and fill in real values for local testing.
 `.env` is already in `.gitignore` — never commit it.
@@ -106,7 +107,7 @@ serves the `/logs/...` endpoint itself.
 1. New → Web Service → connect this GitHub repo
 2. Build command: `pip install -r requirements.txt`
 3. Start command: `uvicorn bot:app --host 0.0.0.0 --port $PORT`
-4. Add `TELEGRAM_BOT_TOKEN`, `GEMINI_API_KEY`, `TAVILY_API_KEY` (optional), `LOG_DIR=logs` as env vars
+4. Add `TELEGRAM_BOT_TOKEN`, `GROQ_API_KEY`, `TAVILY_API_KEY` (optional), `LOG_DIR=logs` as env vars
 5. Deploy once to get your assigned URL (e.g. `https://your-app.onrender.com`)
 6. Go back and add `PUBLIC_BASE_URL=https://your-app.onrender.com`, redeploy
 
@@ -141,10 +142,9 @@ for stray formatting, but it's worth confirming in practice.
   end-to-end; not something to expose beyond this.
 - **In-memory chat history** resets on restart. Doesn't affect grading since
   each message still gets a complete, independent answer.
-- Double-check `GEMINI_MODEL` in `config.py`/`.env` against Google's current
-  docs before deploying — model names get retired (e.g. Gemini 2.0 Flash
-  was shut down mid-2026) and free-tier eligibility shifts between model
-  generations.
+- Double-check `GROQ_MODEL` in `config.py`/`.env` against Groq's current
+  model list before deploying — hosted open-weight models occasionally get
+  deprecated in favor of newer versions.
 - If you skip `TAVILY_API_KEY`, the bot still works — it just won't have a
   `web_search` tool, so it depends on the question already containing a
   dataset URL, or on the model's own knowledge of common sources like MOSPI.
