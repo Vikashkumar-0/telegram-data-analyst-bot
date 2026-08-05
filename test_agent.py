@@ -360,14 +360,12 @@ class TestPseudoToolCallInterception(unittest.TestCase):
         self.assertEqual(args3, {"query": "MOSPI maternal mortality rate"})
 
     def test_run_agent_intercepts_pseudo_tool_call(self):
-        # When model returns pseudo tool syntax in message content, agent loop should intercept, execute, and continue!
         responses = [
             _completion(content='<function.run_python_analysis{"code": "print(25.0)"}</function>'),
             _completion(content='25.0'),
         ]
         agent._last_call_at = 0.0
         with patch("agent.time.sleep"):
-            seen = self._patch_create_recording(responses) if hasattr(self, "_patch_create_recording") else None
             with patch.object(agent.client.chat.completions, "create", side_effect=responses):
                 stub_tools = {"run_python_analysis": lambda **kw: {"stdout": "25.0\n", "stderr": "", "returncode": 0}}
                 with patch.dict(agent.TOOL_FUNCTIONS, stub_tools):
@@ -376,6 +374,23 @@ class TestPseudoToolCallInterception(unittest.TestCase):
                         log_fn=lambda e: None,
                     )
         self.assertEqual(result, '25.0')
+
+    def test_pseudo_tool_call_fallback_to_stdout_when_model_silent(self):
+        # If model outputs empty string after tool execution, agent falls back to stdout instead of returning empty answer!
+        responses = [
+            _completion(content='<function.run_python_analysis{"code": "print(30.0)"}</function>'),
+            _completion(content=''),
+        ]
+        agent._last_call_at = 0.0
+        with patch("agent.time.sleep"):
+            with patch.object(agent.client.chat.completions, "create", side_effect=responses):
+                stub_tools = {"run_python_analysis": lambda **kw: {"stdout": "30.0\n", "stderr": "", "returncode": 0}}
+                with patch.dict(agent.TOOL_FUNCTIONS, stub_tools):
+                    result = agent.run_agent(
+                        [{"role": "user", "text": "Average?"}],
+                        log_fn=lambda e: None,
+                    )
+        self.assertEqual(result, '30.0')
 
 
 if __name__ == "__main__":

@@ -341,21 +341,37 @@ def run_agent(history, log_fn, max_steps: int = 8):
                 tool_fn = TOOL_FUNCTIONS[pseudo_name]
                 result = tool_fn(**pseudo_args)
                 log_fn({"event": "pseudo_tool_call_intercepted", "step": step, "tool": pseudo_name, "input": pseudo_args, "output": result})
+
+                stdout = ""
+                if isinstance(result, dict) and "stdout" in result:
+                    stdout = (result.get("stdout") or "").strip()
+                elif isinstance(result, dict) and "results" in result:
+                    stdout = json.dumps(result.get("results"), ensure_ascii=False)
+
                 messages.append({
                     "role": "assistant",
-                    "content": message.content,
+                    "content": f"Executed tool {pseudo_name}",
                 })
                 messages.append({
                     "role": "user",
                     "content": (
-                        f"Tool '{pseudo_name}' was executed with result:\n"
-                        f"{json.dumps(result, ensure_ascii=False)}\n"
-                        f"Now answer the original question directly using this result."
+                        f"Tool '{pseudo_name}' result:\n{json.dumps(result, ensure_ascii=False)}\n"
+                        f"State your final answer clearly in plain text or table based on this result. Do NOT output function tags."
                     ),
                 })
-                continue
+                try:
+                    followup = _call_model(messages)
+                    final_text = (followup.choices[0].message.content or "").strip()
+                    if final_text:
+                        return final_text
+                except Exception as e:
+                    log_fn({"event": "followup_error", "error": str(e)})
+
+                if stdout:
+                    return stdout
 
             return (message.content or "").strip()
+
 
 
         # Keep the assistant's tool-call turn in the conversation so the

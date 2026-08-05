@@ -61,6 +61,7 @@ def extract_answer_value(raw_text):
       - ```json ... ``` code blocks
       - Double-nested dicts: {"answer": {"answer": 30.0}} -> 30.0
       - Concatenated JSON strings: {"answer": 25.0}{"answer": 25.0} -> 25.0
+      - Pseudo function tags: <function...{...}</function>
       - Numeric strings & raw text markdown
     """
     if raw_text is None:
@@ -73,11 +74,7 @@ def extract_answer_value(raw_text):
     # Strip leading/trailing markdown code fences if present
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
 
-    # Strip pseudo tool call tags if present
-    text = re.sub(r"</?function[^>]*>", "", text).strip()
-
     # Case 1: Direct JSON parse
-
     try:
         parsed = json.loads(text)
         return _unwrap_answer(parsed)
@@ -93,7 +90,18 @@ def extract_answer_value(raw_text):
         except (json.JSONDecodeError, ValueError):
             continue
 
-    # Case 3: Pure numeric string
+    # Case 3: Inner JSON inside <function...{...}</function>
+    m_func = re.search(r"<function[.=:\s]*\w*\s*(\{.*?\})\s*(?:</function>|>)?", text, flags=re.DOTALL)
+    if m_func:
+        try:
+            parsed = json.loads(m_func.group(1))
+            unwrapped = _unwrap_answer(parsed)
+            if unwrapped:
+                return unwrapped
+        except Exception:
+            pass
+
+    # Case 4: Pure numeric string
     try:
         if re.match(r"^-?\d+\.\d+$", text):
             return float(text)
@@ -102,6 +110,12 @@ def extract_answer_value(raw_text):
     except ValueError:
         pass
 
-    # Default fallback: return text as-is
+    # Case 5: Safe tag cleanup (removes <function...> and </function> tags without deleting content)
+    cleaned = re.sub(r"<function[.=:\s]*\w*", "", text)
+    cleaned = re.sub(r"</function>", "", cleaned).strip()
+    if cleaned:
+        return cleaned
+
     return text
+
 
