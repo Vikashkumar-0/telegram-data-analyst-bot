@@ -35,7 +35,8 @@ log = logging.getLogger("databot")
 # Per-chat history kept in memory.
 HISTORY: dict[int, list] = {}
 
-telegram_app = ApplicationBuilder().token(config.TELEGRAM_BOT_TOKEN).build()
+bot_token = config.TELEGRAM_BOT_TOKEN or "dummy-telegram-token"
+telegram_app = ApplicationBuilder().token(bot_token).build()
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -82,33 +83,55 @@ telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await telegram_app.initialize()
-    await telegram_app.start()
+    setup_task = None
+    if config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_BOT_TOKEN != "dummy-telegram-token":
+        try:
+            await telegram_app.initialize()
+            await telegram_app.start()
 
-    if config.USE_POLLING:
-        log.info("Starting Telegram bot in POLLING mode...")
-        await telegram_app.updater.start_polling()
-        log.info("Telegram polling started successfully")
+            async def _setup_telegram():
+                try:
+                    if config.USE_POLLING:
+                        log.info("Starting Telegram bot in POLLING mode...")
+                        await telegram_app.updater.start_polling()
+                        log.info("Telegram polling started successfully")
+                    else:
+                        webhook_url = f"{config.PUBLIC_BASE_URL}/webhook"
+                        log.info("Setting Telegram webhook to %s...", webhook_url)
+                        await telegram_app.bot.set_webhook(
+                            url=webhook_url,
+                            secret_token=config.WEBHOOK_SECRET or None,
+                            drop_pending_updates=False,
+                        )
+                        log.info("Telegram webhook set successfully to %s", webhook_url)
+                except Exception as e:
+                    log.error("Failed to set up Telegram webhook/polling: %s", e)
+
+            setup_task = asyncio.create_task(_setup_telegram())
+        except Exception as e:
+            log.error("Failed to initialize telegram app: %s", e)
     else:
-        webhook_url = f"{config.PUBLIC_BASE_URL}/webhook"
-        log.info("Starting Telegram bot in WEBHOOK mode at %s...", webhook_url)
-        await telegram_app.bot.set_webhook(
-            url=webhook_url,
-            secret_token=config.WEBHOOK_SECRET or None,
-            drop_pending_updates=False,
-        )
-        log.info("Telegram webhook set successfully to %s", webhook_url)
+        log.warning("TELEGRAM_BOT_TOKEN is not configured; Telegram integration disabled for this session")
 
+    # Yield immediately so uvicorn binds to PORT without waiting on Telegram network calls
     yield
 
-    if config.USE_POLLING and telegram_app.updater and telegram_app.updater.running:
-        await telegram_app.updater.stop()
+    if setup_task and not setup_task.done():
+        setup_task.cancel()
 
-    await telegram_app.stop()
-    await telegram_app.shutdown()
+    try:
+        if config.USE_POLLING and telegram_app.updater and telegram_app.updater.running:
+            await telegram_app.updater.stop()
+
+        if telegram_app.running:
+            await telegram_app.stop()
+            await telegram_app.shutdown()
+    except Exception as e:
+        log.error("Error shutting down telegram app: %s", e)
 
 
 app = FastAPI(lifespan=lifespan)
+
 
 
 @app.get("/")

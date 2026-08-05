@@ -28,10 +28,10 @@ def _require(name: str, fallback_env: str = None) -> str:
     return value
 
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "dummy-telegram-token")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 
 # Groq hosts open-weight models on fast custom chips -- console.groq.com/keys.
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY") or os.environ.get("GEMINI_API_KEY") or "dummy-groq-key"
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY") or os.environ.get("GEMINI_API_KEY") or ""
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
@@ -41,6 +41,7 @@ GROQ_RATE_LIMIT_RETRY_SECONDS = float(os.environ.get("GROQ_RATE_LIMIT_RETRY_SECO
 
 # Optional Tavily key for web search
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
+
 
 # Public HTTPS URL (e.g. https://telegram-data-analyst-bot-ogij.onrender.com)
 PUBLIC_BASE_URL = (os.environ.get("PUBLIC_BASE_URL") or os.environ.get("BASE_URL") or "http://localhost:8000").rstrip("/")
