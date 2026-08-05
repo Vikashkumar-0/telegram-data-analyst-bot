@@ -508,5 +508,117 @@ class TestUserSixScenarios(unittest.TestCase):
                         self.assertNotIn("example.com", val)
 
 
+class TestJsonDuplicationRegression(unittest.TestCase):
+    """
+    Regression tests for the reported bug:
+        {"answer": "{\\"answer\\": 25.0}{\\"answer\\": 25.0}", "log_url": "..."}
+    instead of the desired:
+        {"answer": 25.0, "log_url": "..."}
+
+    Each test runs the FULL pipeline exactly as bot.py does it:
+        raw_answer = run_agent(...)
+        answer_value = extract_answer_value(raw_answer)
+        reply_str = json.dumps({"answer": answer_value, "log_url": ...}, ensure_ascii=False)
+    not just extract_answer_value() in isolation, so a fix that only works
+    at the unit level but not through the real call chain would be caught.
+    """
+
+    def setUp(self):
+        agent._last_call_at = 0.0
+
+    def _run_full_pipeline(self, question, responses, stub_tools=None):
+        from utils import extract_answer_value
+        with patch("agent.time.sleep"):
+            with patch.object(agent.client.chat.completions, "create", side_effect=responses):
+                with patch.dict(agent.TOOL_FUNCTIONS, stub_tools or {}):
+                    raw_answer = agent.run_agent([{"role": "user", "text": question}], log_fn=lambda e: None)
+        answer_value = extract_answer_value(raw_answer)
+        reply_str = json.dumps({"answer": answer_value, "log_url": "https://example.com/logs/1.jsonl"}, ensure_ascii=False)
+        return raw_answer, answer_value, reply_str
+
+    def test_model_echoes_duplicated_answer_json_after_tool_call(self):
+        # Exact repro: after a real tool round-trip, the model's own final
+        # message content comes back as two concatenated JSON objects
+        # (a known Groq/open-weight repetition glitch).
+        responses = [
+            _completion(tool_calls=[_tool_call("call_1", "run_python_analysis", {"code": "print(((1000-800)/800)*100)"})]),
+            _completion(content='{"answer": 25.0}{"answer": 25.0}'),
+        ]
+        stub_tools = {"run_python_analysis": lambda **kw: {"stdout": "25.0\n", "stderr": "", "returncode": 0}}
+        raw, val, reply = self._run_full_pipeline(
+            "A product price increased from ₹800 to ₹1,000. What is the percentage increase?",
+            responses, stub_tools,
+        )
+        self.assertEqual(val, 25.0)
+        self.assertEqual(reply, '{"answer": 25.0, "log_url": "https://example.com/logs/1.jsonl"}')
+
+    def test_model_echoes_full_three_key_envelope(self):
+        # A stricter variant: the model ignores rule 8 and hallucinates the
+        # ENTIRE reply envelope itself, including a fabricated log_url and a
+        # "status" key -- three keys, not the two-key {"answer": x} shape.
+        responses = [_completion(content='{"answer": 25.0, "log_url": "https://fake/logs/x.jsonl", "status": "ok"}')]
+        raw, val, reply = self._run_full_pipeline(
+            "A product price increased from ₹800 to ₹1,000. What is the percentage increase?",
+            responses,
+        )
+        self.assertEqual(val, 25.0)
+        self.assertEqual(reply, '{"answer": 25.0, "log_url": "https://example.com/logs/1.jsonl"}')
+        # The real log_url (bot.py's own) must win -- never the model's fabricated one.
+        self.assertNotIn("fake", reply)
+
+    def test_already_parsed_dict_answer_is_not_double_encoded(self):
+        # Structured (non-scalar) answers must land as real nested JSON, not
+        # as an escaped JSON *string* under "answer".
+        responses = [_completion(content='{"state": "Assam"}')]
+        raw, val, reply = self._run_full_pipeline(
+            "Which state has the highest maternal mortality rate?", responses,
+        )
+        self.assertEqual(val, {"state": "Assam"})
+        self.assertEqual(reply, '{"answer": {"state": "Assam"}, "log_url": "https://example.com/logs/1.jsonl"}')
+        # A double-encoded value would show up as an escaped string like this:
+        self.assertNotIn('\\"state\\"', reply)
+
+
+class TestSearchToolActuallyExecutes(unittest.TestCase):
+    """
+    Guards against the model being trusted to invent a source instead of the
+    real Tavily call being made. If the model asks for web_search, the real
+    (stubbed-in-test, real-in-prod) data_tools.web_search path must run, and
+    the model's final answer must come from the returned snippet -- never
+    from a fabricated URL like https://example.com/mospi_data.csv.
+    """
+
+    def setUp(self):
+        agent._last_call_at = 0.0
+
+    def test_web_search_tool_is_invoked_not_fabricated(self):
+        search_calls = []
+
+        def real_ish_search(query=""):
+            search_calls.append(query)
+            # Mirrors data_tools.web_search's return shape without hitting the network.
+            return {"results": [{"title": "MOSPI", "url": "https://mospi.gov.in/data", "snippet": "Assam: 215"}]}
+
+        responses = [
+            _completion(tool_calls=[_tool_call("call_1", "web_search", {"query": "MOSPI maternal mortality rate by state"})]),
+            _completion(content="Based on the MOSPI data found via search, Assam has the highest rate."),
+        ]
+        with patch("agent.time.sleep"):
+            with patch.object(agent.config, "TAVILY_API_KEY", "real-tavily-key"):
+                with patch.object(agent.client.chat.completions, "create", side_effect=responses):
+                    with patch.dict(agent.TOOL_FUNCTIONS, {"web_search": real_ish_search}):
+                        result = agent.run_agent(
+                            [{"role": "user", "text": "Which state has highest MMR per MOSPI?"}],
+                            log_fn=lambda e: None,
+                        )
+        self.assertEqual(search_calls, ["MOSPI maternal mortality rate by state"])
+        self.assertIn("Assam", result)
+        self.assertNotIn("example.com", result)
+
+    def test_system_prompt_forbids_fabricated_urls(self):
+        prompt = agent._build_system_prompt()
+        self.assertIn("NEVER invent fake dataset URLs", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

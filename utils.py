@@ -22,7 +22,7 @@ def _unwrap_answer(val):
             if len(val) == 1 and "answer" in val:
                 val = val["answer"]
                 continue
-            elif "answer" in val and len(val) <= 2 and ("log_url" in val or "status" in val):
+            elif "answer" in val and ("log_url" in val or "status" in val):
                 val = val["answer"]
                 continue
         if isinstance(val, str):
@@ -129,5 +129,3 @@ def extract_answer_value(raw_text):
         return cleaned
 
     return text
-
-
