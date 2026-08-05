@@ -54,13 +54,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         raw_answer = run_agent(history, run_logger.log)
+        if not raw_answer:
+            log.warning("Empty response from run_agent, retrying once...")
+            raw_answer = run_agent(history, run_logger.log)
+
+        if not raw_answer:
+            raw_answer = "Error: Unable to compute an answer for this request."
+
         history.append({"role": "assistant", "text": raw_answer or ""})
         answer_value = extract_answer_value(raw_answer)
         run_logger.log({"event": "final_answer", "answer": answer_value})
     except Exception as e:
         log.exception("agent failed")
         run_logger.log({"event": "error", "error": str(e)})
-        answer_value = None
+        answer_value = f"Error processing request: {str(e)}"
 
     reply_obj = {"answer": answer_value, "log_url": run_logger.url}
     # ensure_ascii=False ensures unicode characters like ₹, →, -, % are rendered as clean UTF-8
@@ -113,6 +120,13 @@ async def health():
     }
 
 
+async def _process_update_task(update: Update):
+    try:
+        await telegram_app.process_update(update)
+    except Exception as e:
+        log.exception("Unhandled error processing update %s", getattr(update, "update_id", None))
+
+
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
     if config.WEBHOOK_SECRET:
@@ -123,13 +137,14 @@ async def telegram_webhook(request: Request):
     try:
         data = await request.json()
         update = Update.de_json(data, telegram_app.bot)
-        # Schedule update processing asynchronously on event loop
-        asyncio.create_task(telegram_app.process_update(update))
+        if update:
+            asyncio.create_task(_process_update_task(update))
     except Exception as e:
         log.exception("Failed to parse webhook update")
         return JSONResponse({"error": str(e)}, status_code=400)
 
     return {"status": "ok"}
+
 
 
 @app.get("/logs/{chat_id}.jsonl")

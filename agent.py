@@ -209,12 +209,18 @@ def _tool_run_python(code: str = "", timeout: int = 60) -> dict:
         f.write(code)
         script_path = f.name
     try:
+        # Security: Strip secret API keys from child environment
+        env = dict(os.environ)
+        for key in ["GROQ_API_KEY", "TELEGRAM_BOT_TOKEN", "TAVILY_API_KEY", "WEBHOOK_SECRET"]:
+            env.pop(key, None)
+
         result = subprocess.run(
             [sys.executable, script_path],
             capture_output=True,
             text=True,
             timeout=timeout,
             cwd=str(data_tools.SANDBOX_DIR),
+            env=env,
         )
         return {
             "stdout": result.stdout[-4000:],
@@ -224,7 +230,12 @@ def _tool_run_python(code: str = "", timeout: int = 60) -> dict:
     except subprocess.TimeoutExpired:
         return {"stdout": "", "stderr": f"TIMEOUT after {timeout}s", "returncode": -1}
     finally:
-        os.unlink(script_path)
+        if os.path.exists(script_path):
+            try:
+                os.unlink(script_path)
+            except Exception:
+                pass
+
 
 
 # name -> function, so the loop below can dispatch with a single dict lookup
@@ -355,7 +366,13 @@ def run_agent(history, log_fn, max_steps: int = 8):
             log_fn({"event": "agent_note", "step": step, "text": message.content[:1000]})
 
         if not message.tool_calls:
-            pseudo_name, pseudo_args = _extract_pseudo_tool_call(message.content or "")
+            content_str = (message.content or "").strip()
+            if not content_str:
+                log_fn({"event": "empty_model_response", "step": step, "note": "model returned empty content with no tool calls; retrying..."})
+                if step < max_steps - 1:
+                    continue
+
+            pseudo_name, pseudo_args = _extract_pseudo_tool_call(content_str)
             if pseudo_name and pseudo_name in TOOL_FUNCTIONS:
                 tool_fn = TOOL_FUNCTIONS[pseudo_name]
                 result = tool_fn(**pseudo_args)
@@ -389,7 +406,8 @@ def run_agent(history, log_fn, max_steps: int = 8):
                 if stdout:
                     return stdout
 
-            return (message.content or "").strip()
+            return content_str
+
 
 
 
