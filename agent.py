@@ -43,14 +43,15 @@ client = OpenAI(api_key=config.GROQ_API_KEY, base_url=config.GROQ_BASE_URL, max_
 def _build_system_prompt():
     if config.TAVILY_API_KEY:
         data_rule = (
-            "3. For questions needing outside data: never guess a fact you could look\n"
-            "   up instead. Use web_search to find the right source, download_dataset\n"
-            "   to fetch it, run_python_analysis to actually compute from it. Print\n"
-            "   intermediate values so you can sanity-check your own work."
+            "3. For questions requiring external/public data (MOSPI, government statistics, web research):\n"
+            "   ALWAYS call `web_search` FIRST to search for verified facts, figures, and sources.\n"
+            "   NEVER invent placeholder URLs like 'latest_MOSPI_data_url' or 'https://example.com'.\n"
+            "   State the actual answer and source clearly once found via search."
         )
         fake_url_rule = (
-            "9. NEVER invent fake dataset URLs or dummy links (such as https://example.com/data.csv). "
-            "If you need a dataset, use only real URLs provided in the question or returned by web_search."
+            "9. NEVER output python code, code dicts like `{\"code\": \"...\"}`, or tool call syntax as your final answer.\n"
+            "   Always provide the COMPUTED RESULT or final textual answer.\n"
+            "   NEVER invent fake dataset URLs or dummy links like 'latest_MOSPI_data_url'."
         )
     else:
         # No TAVILY_API_KEY configured -> web_search is NOT in the tools list
@@ -66,8 +67,9 @@ def _build_system_prompt():
             "   of guessing."
         )
         fake_url_rule = (
-            "9. NEVER invent fake dataset URLs or dummy links (such as https://example.com/data.csv). "
-            "Use only real URLs provided directly in the question."
+            "9. NEVER output python code or code dicts as your final answer.\n"
+            "   Always provide the COMPUTED RESULT or final textual answer.\n"
+            "   NEVER invent fake dataset URLs."
         )
     return f"""You are a helpful assistant running inside a Telegram bot. You can
 answer general questions directly, and you can also do real data analysis
@@ -79,7 +81,7 @@ Rules:
    arithmetic or data, just answer it directly -- do NOT call any tools
    "just in case."
 2. NEVER do arithmetic in your head, no matter how simple it looks --
-   averages, sums, percentages, differences, counts, all of it. Even
+   averages, sums, percentages, differences, counts, medians, all of it. Even
    "what's the average of 5 numbers" MUST go through run_python_analysis.
    You are a language model; your mental math is not reliable enough to
    trust, and there is no reason to guess when a calculator is one tool
@@ -187,8 +189,14 @@ def _tool_web_search(query: str = "") -> dict:
 
 
 def _tool_download_dataset(url: str = "") -> dict:
+    url_str = (url or "").strip()
+    if not url_str.startswith("http://") and not url_str.startswith("https://"):
+        return {
+            "ok": False,
+            "error": f"Invalid URL '{url_str}'. download_dataset requires a real http:// or https:// URL. Use web_search first to find a real dataset URL."
+        }
     try:
-        path = data_tools.download_file(url)
+        path = data_tools.download_file(url_str)
     except Exception as e:
         return {"ok": False, "error": str(e)}
     try:
@@ -392,19 +400,31 @@ def run_agent(history, log_fn, max_steps: int = 8):
                     "role": "user",
                     "content": (
                         f"Tool '{pseudo_name}' result:\n{json.dumps(result, ensure_ascii=False)}\n"
-                        f"State your final answer clearly in plain text or table based on this result. Do NOT output function tags."
+                        f"State your final answer clearly in plain text or table based on this result. Do NOT output code dicts or function tags."
                     ),
                 })
                 try:
                     followup = _call_model(messages)
                     final_text = (followup.choices[0].message.content or "").strip()
-                    if final_text:
+                    f_name, f_args = _extract_pseudo_tool_call(final_text)
+                    if final_text and not f_name and not (final_text.startswith('{"code":') or final_text.startswith('{"url":')):
                         return final_text
                 except Exception as e:
                     log_fn({"event": "followup_error", "error": str(e)})
 
                 if stdout:
                     return stdout
+
+            if content_str.startswith('{"code":') or content_str.startswith('{"url":'):
+                try:
+                    parsed = json.loads(content_str)
+                    if isinstance(parsed, dict) and "code" in parsed and isinstance(parsed["code"], str):
+                        res = TOOL_FUNCTIONS["run_python_analysis"](code=parsed["code"])
+                        out = (res.get("stdout") or "").strip()
+                        if out:
+                            return out
+                except Exception:
+                    pass
 
             return content_str
 

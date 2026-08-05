@@ -13,13 +13,27 @@ def _unwrap_answer(val):
     """
     Recursively unwraps dicts like {"answer": ...} or stringified JSON inside "answer"
     to return the underlying native Python value (float, int, dict, list, str).
+    Automatically executes unexecuted code dicts {"code": "..."} in sandbox.
     """
     max_depth = 5
     depth = 0
     while depth < max_depth:
         depth += 1
         if isinstance(val, dict):
-            if len(val) == 1 and "answer" in val:
+            if len(val) == 1 and "code" in val and isinstance(val["code"], str):
+                try:
+                    from agent import _tool_run_python
+                    res = _tool_run_python(code=val["code"])
+                    stdout = (res.get("stdout") or "").strip()
+                    if stdout:
+                        val = stdout
+                        continue
+                except Exception:
+                    pass
+            elif len(val) == 1 and "url" in val:
+                val = val["url"]
+                continue
+            elif len(val) == 1 and "answer" in val:
                 val = val["answer"]
                 continue
             elif "answer" in val and ("log_url" in val or "status" in val):
@@ -39,6 +53,7 @@ def _unwrap_answer(val):
                         continue
                 except (json.JSONDecodeError, ValueError):
                     pass
+
             blocks = re.findall(r"(\{.*?\}|\[.*?\])", val_str, flags=re.DOTALL)
             if blocks:
                 for b in blocks:
