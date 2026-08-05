@@ -21,10 +21,12 @@ Three tools:
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import time
+
 
 from openai import OpenAI, RateLimitError, BadRequestError
 
@@ -266,6 +268,57 @@ def _call_model(messages, **kwargs):
         raise
 
 
+def _extract_pseudo_tool_call(content: str):
+    """
+    Detects pseudo tool calls in text content when open-weight models output syntax
+    like <function.run_python_analysis{...}</function> or {"code": "..."} instead of
+    populating native tool_calls.
+    """
+    if not content or not isinstance(content, str):
+        return None, None
+
+    text = content.strip()
+
+    # Pattern 1: <function.tool_name{"arg": "val"}</function> or <function tool_name>...
+    m1 = re.search(r"<function[.=:\s]+(\w+)\s*(\{.*?\})\s*(?:</function>|>)?", text, flags=re.DOTALL)
+    if m1:
+        name = m1.group(1)
+        raw_args = m1.group(2)
+        try:
+            args = json.loads(raw_args)
+            return name, args
+        except Exception:
+            pass
+
+    # Pattern 2: {"name": "tool_name", "arguments": {...}}
+    m2 = re.search(r"\{\s*\"(?:name|function)\"\s*:\s*\"(\w+)\"\s*,\s*\"(?:arguments|parameters|args)\"\s*:\s*(\{.*\}|\".*\")\s*\}", text, flags=re.DOTALL)
+    if m2:
+        name = m2.group(1)
+        raw_args = m2.group(2)
+        try:
+            args = json.loads(raw_args) if isinstance(raw_args, str) and raw_args.startswith("{") else json.loads(raw_args)
+            return name, args
+        except Exception:
+            pass
+
+    # Pattern 3: Raw JSON object containing tool argument keys like "code", "query", or "url"
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
+    if cleaned.startswith("{") and cleaned.endswith("}"):
+        try:
+            parsed = json.loads(cleaned)
+            if isinstance(parsed, dict):
+                if "code" in parsed and isinstance(parsed["code"], str):
+                    return "run_python_analysis", {"code": parsed["code"]}
+                if "query" in parsed and isinstance(parsed["query"], str):
+                    return "web_search", {"query": parsed["query"]}
+                if "url" in parsed and isinstance(parsed["url"], str) and parsed["url"].startswith("http"):
+                    return "download_dataset", {"url": parsed["url"]}
+        except Exception:
+            pass
+
+    return None, None
+
+
 def run_agent(history, log_fn, max_steps: int = 8):
     """
     history: running conversation for this chat, oldest first, as
@@ -283,7 +336,27 @@ def run_agent(history, log_fn, max_steps: int = 8):
             log_fn({"event": "agent_note", "step": step, "text": message.content[:1000]})
 
         if not message.tool_calls:
+            pseudo_name, pseudo_args = _extract_pseudo_tool_call(message.content or "")
+            if pseudo_name and pseudo_name in TOOL_FUNCTIONS:
+                tool_fn = TOOL_FUNCTIONS[pseudo_name]
+                result = tool_fn(**pseudo_args)
+                log_fn({"event": "pseudo_tool_call_intercepted", "step": step, "tool": pseudo_name, "input": pseudo_args, "output": result})
+                messages.append({
+                    "role": "assistant",
+                    "content": message.content,
+                })
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"Tool '{pseudo_name}' was executed with result:\n"
+                        f"{json.dumps(result, ensure_ascii=False)}\n"
+                        f"Now answer the original question directly using this result."
+                    ),
+                })
+                continue
+
             return (message.content or "").strip()
+
 
         # Keep the assistant's tool-call turn in the conversation so the
         # model (and Groq, which requires it) can see what it already asked

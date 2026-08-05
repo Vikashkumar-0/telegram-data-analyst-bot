@@ -73,7 +73,11 @@ def extract_answer_value(raw_text):
     # Strip leading/trailing markdown code fences if present
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
 
+    # Strip pseudo tool call tags if present
+    text = re.sub(r"</?function[^>]*>", "", text).strip()
+
     # Case 1: Direct JSON parse
+
     try:
         parsed = json.loads(text)
         return _unwrap_answer(parsed)

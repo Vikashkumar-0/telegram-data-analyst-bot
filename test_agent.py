@@ -337,5 +337,46 @@ class TestRealWorldQuestions(unittest.TestCase):
         self.assertNotIn(r"\u2192", reply_json)
 
 
+class TestPseudoToolCallInterception(unittest.TestCase):
+    def test_extract_pseudo_tool_call_patterns(self):
+        from agent import _extract_pseudo_tool_call
+
+        # Pattern 1: <function.run_python_analysis{...}</function>
+        text1 = '<function.run_python_analysis{"code": "print(25.0)"}</function>'
+        name1, args1 = _extract_pseudo_tool_call(text1)
+        self.assertEqual(name1, "run_python_analysis")
+        self.assertEqual(args1, {"code": "print(25.0)"})
+
+        # Pattern 2: {"code": "..."}
+        text2 = '{"code": "import numpy as np\\nprint(25.0)"}'
+        name2, args2 = _extract_pseudo_tool_call(text2)
+        self.assertEqual(name2, "run_python_analysis")
+        self.assertEqual(args2, {"code": "import numpy as np\nprint(25.0)"})
+
+        # Pattern 3: {"query": "..."}
+        text3 = '{"query": "MOSPI maternal mortality rate"}'
+        name3, args3 = _extract_pseudo_tool_call(text3)
+        self.assertEqual(name3, "web_search")
+        self.assertEqual(args3, {"query": "MOSPI maternal mortality rate"})
+
+    def test_run_agent_intercepts_pseudo_tool_call(self):
+        # When model returns pseudo tool syntax in message content, agent loop should intercept, execute, and continue!
+        responses = [
+            _completion(content='<function.run_python_analysis{"code": "print(25.0)"}</function>'),
+            _completion(content='25.0'),
+        ]
+        agent._last_call_at = 0.0
+        with patch("agent.time.sleep"):
+            seen = self._patch_create_recording(responses) if hasattr(self, "_patch_create_recording") else None
+            with patch.object(agent.client.chat.completions, "create", side_effect=responses):
+                stub_tools = {"run_python_analysis": lambda **kw: {"stdout": "25.0\n", "stderr": "", "returncode": 0}}
+                with patch.dict(agent.TOOL_FUNCTIONS, stub_tools):
+                    result = agent.run_agent(
+                        [{"role": "user", "text": "Percentage increase?"}],
+                        log_fn=lambda e: None,
+                    )
+        self.assertEqual(result, '25.0')
+
+
 if __name__ == "__main__":
     unittest.main()
