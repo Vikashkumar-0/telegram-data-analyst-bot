@@ -102,7 +102,19 @@ def extract_answer_value(raw_text):
         except (json.JSONDecodeError, ValueError):
             continue
 
-    # Case 3: Inner JSON inside <function...{...}</function>
+    # Case 3: Emergency execution safety net for pseudo tool call strings (e.g. /run_python_analysis{"code": ...})
+    try:
+        from agent import _extract_pseudo_tool_call, _tool_run_python
+        pseudo_name, pseudo_args = _extract_pseudo_tool_call(text)
+        if pseudo_name == "run_python_analysis" and isinstance(pseudo_args, dict) and "code" in pseudo_args:
+            res = _tool_run_python(code=pseudo_args["code"])
+            stdout = (res.get("stdout") or "").strip()
+            if stdout:
+                return _unwrap_answer(stdout)
+    except Exception:
+        pass
+
+    # Case 4: Inner JSON inside <function...{...}</function>
     m_func = re.search(r"<function[.=:\s]*\w*\s*(\{.*?\})\s*(?:</function>|>)?", text, flags=re.DOTALL)
     if m_func:
         try:
@@ -112,6 +124,7 @@ def extract_answer_value(raw_text):
                 return unwrapped
         except Exception:
             pass
+
 
     # Case 4: Pure numeric string
     try:

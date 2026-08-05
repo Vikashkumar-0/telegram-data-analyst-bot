@@ -280,38 +280,46 @@ def _call_model(messages, **kwargs):
 
 def _extract_pseudo_tool_call(content: str):
     """
-    Detects pseudo tool calls in text content when open-weight models output syntax
-    like <function.run_python_analysis{...}</function> or {"code": "..."} instead of
-    populating native tool_calls.
+    Detects and extracts pseudo tool calls from open-weight LLM content.
+    Handles all formats:
+      - /tool_name{"arg": "val"}
+      - <function.tool_name{"arg": "val"}</function>
+      - <function=tool_name>{"arg": "val"}</function>
+      - {"name": "tool_name", "arguments": {...}}
+      - {"code": "..."}
+      - {"query": "..."}
+      - {"url": "..."}
     """
     if not content or not isinstance(content, str):
         return None, None
 
     text = content.strip()
 
-    # Pattern 1: <function.tool_name{"arg": "val"}</function> or <function tool_name>...
-    m1 = re.search(r"<function[.=:\s]+(\w+)\s*(\{.*?\})\s*(?:</function>|>)?", text, flags=re.DOTALL)
+    # Format A: /tool_name{...} or <function.tool_name{...}</function> or <function tool_name>{...}
+    m1 = re.search(r"(?:/|<function[.=:\s]*|)(\b(?:run_python_analysis|web_search|download_dataset)\b)\s*(\{.*?\})\s*(?:</function>|>)?", text, flags=re.DOTALL)
     if m1:
         name = m1.group(1)
         raw_args = m1.group(2)
         try:
             args = json.loads(raw_args)
-            return name, args
+            if isinstance(args, dict):
+                return name, args
         except Exception:
             pass
 
-    # Pattern 2: {"name": "tool_name", "arguments": {...}}
+    # Format B: {"name": "tool_name", "arguments": {...}} or {"function": "tool_name", ...}
     m2 = re.search(r"\{\s*\"(?:name|function)\"\s*:\s*\"(\w+)\"\s*,\s*\"(?:arguments|parameters|args)\"\s*:\s*(\{.*\}|\".*\")\s*\}", text, flags=re.DOTALL)
     if m2:
         name = m2.group(1)
         raw_args = m2.group(2)
         try:
             args = json.loads(raw_args) if isinstance(raw_args, str) and raw_args.startswith("{") else json.loads(raw_args)
-            return name, args
+            if isinstance(args, dict):
+                return name, args
         except Exception:
             pass
 
-    # Pattern 3: Raw JSON object containing tool argument keys like "code", "query", or "url"
+    # Format C: Raw JSON dict with tool parameter keys ("code", "query", "url")
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
     if cleaned.startswith("{") and cleaned.endswith("}"):
         try:
@@ -327,6 +335,7 @@ def _extract_pseudo_tool_call(content: str):
             pass
 
     return None, None
+
 
 
 def run_agent(history, log_fn, max_steps: int = 8):
