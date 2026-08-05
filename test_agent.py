@@ -393,5 +393,120 @@ class TestPseudoToolCallInterception(unittest.TestCase):
         self.assertEqual(result, '30.0')
 
 
+class TestUserSixScenarios(unittest.TestCase):
+    def setUp(self):
+        agent._last_call_at = 0.0
+
+    def test_case_1_average_calculation(self):
+        from utils import extract_answer_value
+        responses = [
+            _completion(tool_calls=[_tool_call("call_1", "run_python_analysis", {"code": "print(sum([10,20,30,40,50])/5)"})]),
+            _completion(content="30.0"),
+        ]
+        with patch("agent.time.sleep"):
+            with patch.object(agent.client.chat.completions, "create", side_effect=responses):
+                stub_tools = {"run_python_analysis": lambda **kw: {"stdout": "30.0\n", "stderr": "", "returncode": 0}}
+                with patch.dict(agent.TOOL_FUNCTIONS, stub_tools):
+                    raw = agent.run_agent([{"role": "user", "text": "What is the average of 10, 20, 30, 40, and 50?"}], log_fn=lambda e: None)
+                    val = extract_answer_value(raw)
+                    self.assertIn(val, (30, 30.0, "30", "30.0"))
+                    reply = json.dumps({"answer": val, "log_url": "https://example.com/logs/1.jsonl"}, ensure_ascii=False)
+                    self.assertEqual(reply, '{"answer": 30.0, "log_url": "https://example.com/logs/1.jsonl"}')
+
+    def test_case_2_percentage_increase(self):
+        from utils import extract_answer_value
+        responses = [
+            _completion(tool_calls=[_tool_call("call_1", "run_python_analysis", {"code": "print(((1000-800)/800)*100)"})]),
+            _completion(content="25.0"),
+        ]
+        with patch("agent.time.sleep"):
+            with patch.object(agent.client.chat.completions, "create", side_effect=responses):
+                stub_tools = {"run_python_analysis": lambda **kw: {"stdout": "25.0\n", "stderr": "", "returncode": 0}}
+                with patch.dict(agent.TOOL_FUNCTIONS, stub_tools):
+                    raw = agent.run_agent([{"role": "user", "text": "A product price increased from ₹800 to ₹1,000. What is the percentage increase?"}], log_fn=lambda e: None)
+                    val = extract_answer_value(raw)
+                    self.assertIn(val, (25, 25.0, "25", "25.0"))
+                    reply = json.dumps({"answer": val, "log_url": "https://example.com/logs/1.jsonl"}, ensure_ascii=False)
+                    self.assertEqual(reply, '{"answer": 25.0, "log_url": "https://example.com/logs/1.jsonl"}')
+
+    def test_case_3_sales_data_analysis_table(self):
+        from utils import extract_answer_value
+        table_output = (
+            "| Metric | Value |\n"
+            "|---|---|\n"
+            "| Mean | 140.0 |\n"
+            "| Median | 130.0 |\n"
+            "| Jan→Feb | 20.0% |\n"
+            "| Feb→Mar | 25.0% |\n"
+            "| Mar→Apr | -13.33% |\n"
+            "| Apr→May | 53.85% |\n"
+            "| Highest Month | May |"
+        )
+        responses = [
+            _completion(tool_calls=[_tool_call("call_1", "run_python_analysis", {"code": "import pandas as pd..."})]),
+            _completion(content=table_output),
+        ]
+        with patch("agent.time.sleep"):
+            with patch.object(agent.client.chat.completions, "create", side_effect=responses):
+                stub_tools = {"run_python_analysis": lambda **kw: {"stdout": "Mean: 140\nMedian: 130\n", "stderr": "", "returncode": 0}}
+                with patch.dict(agent.TOOL_FUNCTIONS, stub_tools):
+                    raw = agent.run_agent([{"role": "user", "text": "I have sales data: January 100, February 120, March 150, April 130, May 200..."}], log_fn=lambda e: None)
+                    val = extract_answer_value(raw)
+                    self.assertIn("140", val)
+                    self.assertIn("130", val)
+                    self.assertIn("20", val)
+                    self.assertIn("25", val)
+                    self.assertIn("-13.33", val)
+                    self.assertIn("53.85", val)
+                    self.assertIn("May", val)
+                    reply = json.dumps({"answer": val, "log_url": "https://example.com/logs/1.jsonl"}, ensure_ascii=False)
+                    self.assertNotIn(r"\u2192", reply)
+
+    def test_case_4_rmsle_explanation_no_tools(self):
+        from utils import extract_answer_value
+        explanation = "RMSLE measures relative error and penalizes underestimates more than overestimates..."
+        responses = [_completion(content=explanation)]
+        with patch("agent.time.sleep"):
+            with patch.object(agent.client.chat.completions, "create", side_effect=responses) as mock_create:
+                raw = agent.run_agent([{"role": "user", "text": "Explain why RMSLE is useful for predicting heavy equipment selling prices..."}], log_fn=lambda e: None)
+                val = extract_answer_value(raw)
+                self.assertEqual(val, explanation)
+                self.assertEqual(mock_create.call_count, 1)
+
+    def test_case_5_prime_minister_general_question(self):
+        from utils import extract_answer_value
+        responses = [_completion(content="The current Prime Minister of India is Narendra Modi.")]
+        with patch("agent.time.sleep"):
+            with patch.object(agent.client.chat.completions, "create", side_effect=responses) as mock_create:
+                raw = agent.run_agent([{"role": "user", "text": "Who is the current Prime Minister of India?"}], log_fn=lambda e: None)
+                val = extract_answer_value(raw)
+                self.assertIn("Narendra Modi", val)
+                self.assertEqual(mock_create.call_count, 1)
+
+    def test_case_6_genuine_external_data_search_execution(self):
+        from utils import extract_answer_value
+        responses = [
+            _completion(tool_calls=[_tool_call("call_search", "web_search", {"query": "MOSPI maternal mortality rate state"})]),
+            _completion(content="According to the latest MOSPI report retrieved via web search, Assam reported the highest maternal mortality rate."),
+        ]
+        with patch("agent.time.sleep"):
+            with patch.object(agent.config, "TAVILY_API_KEY", "real-tavily-key"):
+                with patch.object(agent.client.chat.completions, "create", side_effect=responses):
+                    search_called = []
+                    def stub_search(query):
+                        search_called.append(query)
+                        return [{"title": "MOSPI Data", "url": "https://mospi.gov.in/mmr", "snippet": "Assam MMR is 215 per 100k"}]
+
+                    stub_tools = {
+                        "web_search": lambda query="": {"results": stub_search(query)},
+                    }
+                    with patch.dict(agent.TOOL_FUNCTIONS, stub_tools):
+                        raw = agent.run_agent([{"role": "user", "text": "Which state has highest MMR according to MOSPI data?"}], log_fn=lambda e: None)
+                        val = extract_answer_value(raw)
+                        self.assertEqual(len(search_called), 1)
+                        self.assertIn("Assam", val)
+                        self.assertNotIn("example.com", val)
+
+
 if __name__ == "__main__":
     unittest.main()

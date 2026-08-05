@@ -12,7 +12,7 @@ import re
 def _unwrap_answer(val):
     """
     Recursively unwraps dicts like {"answer": ...} or stringified JSON inside "answer"
-    to prevent double nesting (e.g. {"answer": {"answer": 30.0}} -> 30.0).
+    to return the underlying native Python value (float, int, dict, list, str).
     """
     max_depth = 5
     depth = 0
@@ -27,6 +27,10 @@ def _unwrap_answer(val):
                 continue
         if isinstance(val, str):
             val_str = val.strip()
+            if re.match(r"^-?\d+\.\d+$", val_str):
+                return float(val_str)
+            if re.match(r"^-?\d+$", val_str):
+                return int(val_str)
             if (val_str.startswith("{") and val_str.endswith("}")) or (val_str.startswith("[") and val_str.endswith("]")):
                 try:
                     parsed = json.loads(val_str)
@@ -35,9 +39,8 @@ def _unwrap_answer(val):
                         continue
                 except (json.JSONDecodeError, ValueError):
                     pass
-            # Try finding inner json objects if concatenated (e.g. {"answer": 25.0}{"answer": 25.0})
             blocks = re.findall(r"(\{.*?\}|\[.*?\])", val_str, flags=re.DOTALL)
-            if blocks and len(blocks) > 0:
+            if blocks:
                 for b in blocks:
                     try:
                         parsed = json.loads(b)
@@ -49,7 +52,16 @@ def _unwrap_answer(val):
                     break
                 continue
         break
+
+    if isinstance(val, str):
+        val_str = val.strip()
+        if re.match(r"^-?\d+\.\d+$", val_str):
+            return float(val_str)
+        if re.match(r"^-?\d+$", val_str):
+            return int(val_str)
+
     return val
+
 
 
 def extract_answer_value(raw_text):

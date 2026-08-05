@@ -48,6 +48,10 @@ def _build_system_prompt():
             "   to fetch it, run_python_analysis to actually compute from it. Print\n"
             "   intermediate values so you can sanity-check your own work."
         )
+        fake_url_rule = (
+            "9. NEVER invent fake dataset URLs or dummy links (such as https://example.com/data.csv). "
+            "If you need a dataset, use only real URLs provided in the question or returned by web_search."
+        )
     else:
         # No TAVILY_API_KEY configured -> web_search is NOT in the tools list
         # this session. Telling the model to use it anyway (when it isn't
@@ -60,6 +64,10 @@ def _build_system_prompt():
             "   question, or use download_dataset + run_python_analysis on it. If\n"
             "   you can't find a source without searching, say so honestly instead\n"
             "   of guessing."
+        )
+        fake_url_rule = (
+            "9. NEVER invent fake dataset URLs or dummy links (such as https://example.com/data.csv). "
+            "Use only real URLs provided directly in the question."
         )
     return f"""You are a helpful assistant running inside a Telegram bot. You can
 answer general questions directly, and you can also do real data analysis
@@ -91,8 +99,10 @@ Rules:
    your final message should be ONLY the target value for the "answer" field (e.g. {{"state": "Assam"}}, 30.0, or tabular text).
    Do NOT wrap your final message in an outer {{"answer": ...}} dict or duplicate JSON lines, as the system adds the outer
    wrapper and log_url automatically.
+{fake_url_rule}
 
 """
+
 
 
 # Built once at import time from whatever TAVILY_API_KEY actually is --
