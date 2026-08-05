@@ -1,60 +1,254 @@
 """
-tests/test_agent.py
---------------------
-Unit tests for the parts of the project that don't need an API key or
-network access: JSON extraction from model output, and dataset loading.
+tests/test_agent_e2e.py
+------------------------
+End-to-end tests for run_agent()'s whole loop -- multi-step tool calling,
+rate-limit retry, and the max-steps fallback -- WITHOUT calling the real
+Groq API. We patch client.chat.completions.create() to return realistic
+ChatCompletion objects (built from the actual openai SDK's response model,
+so the shape is exactly what Groq/OpenAI would send back).
 
-Run with:  pytest
+This is the standard way to test code that calls an external API: fast,
+free, deterministic, and it doesn't burn real rate-limit quota every time
+you run your test suite.
+
+Run with:  pytest test_agent_e2e.py -v
 """
 
+import json
 import sys
-import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+import httpx
+from openai import RateLimitError, BadRequestError
+from openai.types.chat import ChatCompletion
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import data_tools
-from utils import extract_answer_value
+import agent
 
 
-class TestAgentUtils(unittest.TestCase):
-    def test_extract_answer_value_plain_json(self):
-        self.assertEqual(extract_answer_value('{"state": "Assam"}'), {"state": "Assam"})
+def _completion(content=None, tool_calls=None):
+    """Builds a real ChatCompletion object (same class the SDK returns) from
+    plain Python values, so tests exercise the exact same code paths
+    (tc.model_dump(), message.tool_calls, etc.) as a live response would."""
+    message = {"role": "assistant", "content": content}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    return ChatCompletion.model_validate({
+        "id": "chatcmpl-test",
+        "object": "chat.completion",
+        "created": 0,
+        "model": agent.config.GROQ_MODEL,
+        "choices": [{"index": 0, "finish_reason": "stop", "message": message}],
+    })
 
-    def test_extract_answer_value_code_fenced(self):
-        raw = '```json\n{"count": 42}\n```'
-        self.assertEqual(extract_answer_value(raw), {"count": 42})
 
-    def test_extract_answer_value_surrounded_by_text(self):
-        raw = 'Here you go: {"total": 7} thanks'
-        self.assertEqual(extract_answer_value(raw), {"total": 7})
+def _tool_call(call_id, name, arguments: dict):
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {"name": name, "arguments": json.dumps(arguments)},
+    }
 
-    def test_extract_answer_value_bare_string_fallback(self):
-        self.assertEqual(extract_answer_value("Assam"), "Assam")
 
-    def test_extract_answer_value_none_input(self):
-        self.assertIsNone(extract_answer_value(None))
+def _rate_limit_error():
+    request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+    response = httpx.Response(status_code=429, request=request, json={"error": {"message": "rate limited"}})
+    return RateLimitError("rate limited", response=response, body=None)
 
-    def test_load_tabular_csv(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            csv_path = Path(tmp_dir) / "sample.csv"
-            csv_path.write_text("state,rate\nAssam,215\nKerala,30\n")
-            df = data_tools.load_tabular(csv_path)
-            self.assertEqual(list(df.columns), ["state", "rate"])
-            self.assertEqual(len(df), 2)
 
-    def test_preview_shape_and_head(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            csv_path = Path(tmp_dir) / "sample.csv"
-            csv_path.write_text("a,b\n1,2\n3,4\n")
-            df = data_tools.load_tabular(csv_path)
-            prev = data_tools.preview(df, n=1)
-            self.assertEqual(prev["shape"], [2, 2])
-            self.assertEqual(len(prev["head"]), 1)
-            self.assertEqual(prev["columns"], ["a", "b"])
+def _tool_use_failed_error(tool_name="web_search"):
+    """Mirrors the exact failure we saw in production: the model tries to
+    call a tool that wasn't declared in this request's `tools` list."""
+    request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+    response = httpx.Response(
+        status_code=400,
+        request=request,
+        json={"error": {
+            "message": f"Tool call validation failed: attempted to call tool '{tool_name}' which was not in request.tools",
+            "code": "tool_use_failed",
+        }},
+    )
+    return BadRequestError("tool_use_failed", response=response, body=None)
+
+
+class TestRunAgentEndToEnd(unittest.TestCase):
+    def setUp(self):
+        # Reset pacing state and make sleeps instant so tests run fast.
+        agent._last_call_at = 0.0
+        self.sleep_patch = patch("agent.time.sleep")
+        self.mock_sleep = self.sleep_patch.start()
+        self.addCleanup(self.sleep_patch.stop)
+
+    def _patch_create(self, side_effect):
+        p = patch.object(agent.client.chat.completions, "create", side_effect=side_effect)
+        mock = p.start()
+        self.addCleanup(p.stop)
+        return mock
+
+    def _patch_create_recording(self, responses):
+        """Like _patch_create, but also snapshots (deep-copies) the
+        `messages` argument at the moment of each call. Needed because
+        run_agent mutates the same list object across the loop -- looking at
+        mock.call_args_list *after* the run finishes would show every call
+        with the FINAL message list, not what was actually sent each time."""
+        seen = []
+
+        def fake_create(model, messages, **kwargs):
+            seen.append((json.loads(json.dumps(messages)), kwargs))
+            return responses[len(seen) - 1]
+
+        p = patch.object(agent.client.chat.completions, "create", side_effect=fake_create)
+        p.start()
+        self.addCleanup(p.stop)
+        return seen
+
+    def test_simple_question_answers_in_one_call_no_tools(self):
+        mock = self._patch_create([_completion(content="Paris is the capital of France.")])
+
+        result = agent.run_agent([{"role": "user", "text": "What's the capital of France?"}], log_fn=lambda e: None)
+
+        self.assertEqual(result, "Paris is the capital of France.")
+        self.assertEqual(mock.call_count, 1)
+
+    def test_multi_step_tool_calling_then_final_answer(self):
+        events = []
+        responses = [
+            _completion(tool_calls=[_tool_call("call_1", "download_dataset", {"url": "https://example.com/data.csv"})]),
+            _completion(tool_calls=[_tool_call("call_2", "run_python_analysis", {"code": "print('Assam')"})]),
+            _completion(content='{"state": "Assam"}'),
+        ]
+        seen = self._patch_create_recording(responses)
+
+        # Stub the tool IMPLEMENTATIONS via the dispatch dict, so this test
+        # exercises the AGENT LOOP's wiring (does it call the right tool,
+        # feed the result back correctly, stop at the right time) without
+        # touching the real network or filesystem. The tools themselves
+        # have their own unit tests in test_agent.py.
+        stub_tools = {
+            "download_dataset": lambda **kw: {"ok": True, "local_path": "/tmp/data.csv"},
+            "run_python_analysis": lambda **kw: {"stdout": "Assam\n", "stderr": "", "returncode": 0},
+        }
+        with patch.dict(agent.TOOL_FUNCTIONS, stub_tools):
+            result = agent.run_agent(
+                [{"role": "user", "text": "Which state has the highest maternal mortality rate?"}],
+                log_fn=events.append,
+            )
+
+        self.assertEqual(result, '{"state": "Assam"}')
+        self.assertEqual(len(seen), 3)
+
+        # Second call's message list must contain the first tool's result,
+        # correctly linked back by tool_call_id -- this is what Groq
+        # requires to know which call each result answers.
+        second_call_messages, _ = seen[1]
+        tool_messages = [m for m in second_call_messages if m["role"] == "tool"]
+        self.assertEqual(len(tool_messages), 1)
+        self.assertEqual(tool_messages[0]["tool_call_id"], "call_1")
+        self.assertEqual(json.loads(tool_messages[0]["content"]), {"ok": True, "local_path": "/tmp/data.csv"})
+
+        tool_call_events = [e for e in events if e["event"] == "tool_call"]
+        self.assertEqual([e["tool"] for e in tool_call_events], ["download_dataset", "run_python_analysis"])
+
+    def test_rate_limit_retries_once_then_succeeds(self):
+        mock = self._patch_create([_rate_limit_error(), _completion(content="ok")])
+
+        result = agent.run_agent([{"role": "user", "text": "hi"}], log_fn=lambda e: None)
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(mock.call_count, 2)
+        # One polite wait using the configured retry delay -- not a retry storm.
+        self.mock_sleep.assert_any_call(agent.config.GROQ_RATE_LIMIT_RETRY_SECONDS)
+
+    def test_rate_limit_twice_raises_instead_of_retrying_forever(self):
+        self._patch_create([_rate_limit_error(), _rate_limit_error()])
+
+        with self.assertRaises(RateLimitError):
+            agent.run_agent([{"role": "user", "text": "hi"}], log_fn=lambda e: None)
+
+    def test_max_steps_exhausted_forces_a_final_no_tools_answer(self):
+        # Model keeps asking for the same tool forever -- simulates a
+        # confused/looping model. After max_steps, we should force ONE more
+        # call with no tools and return whatever it says, not None.
+        looping_response = _completion(
+            tool_calls=[_tool_call("call_x", "run_python_analysis", {"code": "print(1)"})]
+        )
+        forced_final = _completion(content='{"state": "unknown"}')
+        mock = self._patch_create([looping_response] * 8 + [forced_final])
+
+        stub_tools = {"run_python_analysis": lambda **kw: {"stdout": "1\n", "stderr": "", "returncode": 0}}
+        with patch.dict(agent.TOOL_FUNCTIONS, stub_tools):
+            result = agent.run_agent(
+                [{"role": "user", "text": "some ambiguous question"}], log_fn=lambda e: None, max_steps=8
+            )
+
+        self.assertEqual(result, '{"state": "unknown"}')
+        self.assertEqual(mock.call_count, 9)  # 8 looping steps + 1 forced final
+        # The forced final call must NOT offer tools -- otherwise it could
+        # just loop again instead of answering.
+        final_call_kwargs = mock.call_args_list[-1].kwargs
+        self.assertNotIn("tools", final_call_kwargs)
+
+    def test_pacing_waits_between_calls(self):
+        agent._last_call_at = time.monotonic()  # pretend a call JUST happened
+        self._patch_create([_completion(content="ok")])
+
+        agent.run_agent([{"role": "user", "text": "hi"}], log_fn=lambda e: None)
+
+        # Should have slept roughly GROQ_MIN_INTERVAL_SECONDS before calling,
+        # since the "previous call" was just now.
+        waited = [c.args[0] for c in self.mock_sleep.call_args_list if c.args]
+        self.assertTrue(any(w > 0 for w in waited))
+
+    def test_undeclared_tool_call_retries_once_without_tools(self):
+        # Regression test for the production bug: the model tried to call
+        # 'web_search' when it wasn't in the declared tools list (because
+        # TAVILY_API_KEY wasn't set but the prompt still mentioned it). That
+        # crashed the whole run. Now _call_model should catch the 400,
+        # retry ONCE with tools stripped, and get a normal text answer.
+        mock = self._patch_create([_tool_use_failed_error(), _completion(content='{"state": "unknown"}')])
+
+        result = agent.run_agent(
+            [{"role": "user", "text": "Which state has the highest maternal mortality rate?"}],
+            log_fn=lambda e: None,
+        )
+
+        self.assertEqual(result, '{"state": "unknown"}')
+        self.assertEqual(mock.call_count, 2)
+        # The retry must have dropped "tools" -- otherwise the model could
+        # just try to call the same undeclared tool again.
+        self.assertNotIn("tools", mock.call_args_list[1].kwargs)
+
+    def test_other_400_errors_are_not_swallowed(self):
+        # Only the specific "tool_use_failed" case gets a retry. Any other
+        # 400 (bad request body, invalid model name, etc.) should still
+        # surface immediately -- silently retrying every 400 would hide
+        # real bugs instead of fixing this one specific known failure mode.
+        request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+        response = httpx.Response(status_code=400, request=request, json={"error": {"message": "invalid model"}})
+        other_error = BadRequestError("invalid model", response=response, body=None)
+        self._patch_create([other_error])
+
+        with self.assertRaises(BadRequestError):
+            agent.run_agent([{"role": "user", "text": "hi"}], log_fn=lambda e: None)
+
+    def test_system_prompt_never_mentions_web_search_when_tavily_key_missing(self):
+        # Regression test: this exact mismatch (prompt says "use
+        # web_search", tools list doesn't include it because no
+        # TAVILY_API_KEY) is what caused the production 400 in the first
+        # place. Guards against it coming back.
+        with patch.object(agent.config, "TAVILY_API_KEY", None):
+            prompt = agent._build_system_prompt()
+        self.assertNotIn("web_search", prompt)
+
+    def test_system_prompt_mentions_web_search_when_tavily_key_present(self):
+        with patch.object(agent.config, "TAVILY_API_KEY", "fake-key-for-test"):
+            prompt = agent._build_system_prompt()
+        self.assertIn("web_search", prompt)
 
 
 if __name__ == "__main__":
     unittest.main()
-

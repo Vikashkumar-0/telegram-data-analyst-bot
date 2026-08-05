@@ -94,7 +94,10 @@ async def get_log(chat_id: str):
     path = Path(LOG_DIR) / f"{chat_id}.jsonl"
     if not path.exists():
         return JSONResponse({"error": "not found"}, status_code=404)
-    return PlainTextResponse(path.read_text(encoding="utf-8"), media_type="application/x-ndjson")
+    # text/plain (not application/x-ndjson) so it opens as readable text in
+    # a browser and is fetchable by tools that treat unfamiliar MIME types
+    # as opaque binary -- the content itself is unchanged either way.
+    return PlainTextResponse(path.read_text(encoding="utf-8"), media_type="text/plain")
 
 
 if __name__ == "__main__":

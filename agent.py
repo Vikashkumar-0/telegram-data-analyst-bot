@@ -26,7 +26,7 @@ import sys
 import tempfile
 import time
 
-from openai import OpenAI, RateLimitError
+from openai import OpenAI, RateLimitError, BadRequestError
 
 import config
 import data_tools
@@ -38,35 +38,70 @@ import data_tools
 client = OpenAI(api_key=config.GROQ_API_KEY, base_url=config.GROQ_BASE_URL, max_retries=0)
 
 
-SYSTEM_PROMPT = """You are a helpful assistant running inside a Telegram bot. You can
+def _build_system_prompt():
+    if config.TAVILY_API_KEY:
+        data_rule = (
+            "3. For questions needing outside data: never guess a fact you could look\n"
+            "   up instead. Use web_search to find the right source, download_dataset\n"
+            "   to fetch it, run_python_analysis to actually compute from it. Print\n"
+            "   intermediate values so you can sanity-check your own work."
+        )
+    else:
+        # No TAVILY_API_KEY configured -> web_search is NOT in the tools list
+        # this session. Telling the model to use it anyway (when it isn't
+        # actually offered) is exactly what caused it to attempt an
+        # undeclared tool call and crash the run with a 400 -- so this
+        # branch must never mention web_search.
+        data_rule = (
+            "3. You have no internet search capability this session. For data\n"
+            "   questions, work only from a dataset URL already given in the\n"
+            "   question, or use download_dataset + run_python_analysis on it. If\n"
+            "   you can't find a source without searching, say so honestly instead\n"
+            "   of guessing."
+        )
+    return f"""You are a helpful assistant running inside a Telegram bot. You can
 answer general questions directly, and you can also do real data analysis
 when asked -- possibly with inline data, possibly pointing at a public
 dataset (MOSPI or similar).
 
 Rules:
-1. If the question is general and doesn't need a lookup or computation,
-   just answer it directly -- do NOT call any tools "just in case."
-2. For data questions: never guess a number or fact you could look up or
-   compute instead. Use web_search to find the right source, download_dataset
-   to fetch it, run_python_analysis to actually compute from it. Print
-   intermediate values so you can sanity-check your own work.
-3. download_dataset saves files into a shared sandbox directory and tells
+1. If the question is general knowledge or conversation and involves no
+   arithmetic or data, just answer it directly -- do NOT call any tools
+   "just in case."
+2. NEVER do arithmetic in your head, no matter how simple it looks --
+   averages, sums, percentages, differences, counts, all of it. Even
+   "what's the average of 5 numbers" MUST go through run_python_analysis.
+   You are a language model; your mental math is not reliable enough to
+   trust, and there is no reason to guess when a calculator is one tool
+   call away.
+{data_rule}
+4. download_dataset saves files into a shared sandbox directory and tells
    you the local path -- pass that same path into your run_python_analysis
    code to open it (e.g. pd.read_csv("<local_path>")).
-4. Pay close attention to exact wording: units, rounding, "top state" vs
+5. Pay close attention to exact wording: units, rounding, "top state" vs
    "top 3 states", percentage vs raw count, etc.
-5. Be economical with tool calls -- each one costs real API quota. Don't
+6. Be economical with tool calls -- each one costs real API quota. Don't
    search for the same thing twice, and do all your computation in ONE
    run_python_analysis call rather than several small ones whenever you can.
-6. If the question specifies an exact JSON output shape (as data-analysis
-   questions here typically do, e.g. {"answer": {"state": "<state name>"},
-   "log_url": "..."}), your final message must be ONLY the raw JSON value
+7. Only ever call a tool from the list you were given. If you're not sure
+   something is available, don't call it -- answer with what you have.
+8. If the question specifies an exact JSON output shape (as data-analysis
+   questions here typically do, e.g. {{"answer": {{"state": "<state name>"}},
+   "log_url": "..."}}), your final message must be ONLY the raw JSON value
    for the "answer" key -- no markdown, no code fences, no explanation, no
    surrounding object, no "log_url" (the system adds that separately).
-   Example: if the question wants {"answer": {"state": "Assam"}, ...}, your
-   final message should be exactly: {"state": "Assam"}
+   Example: if the question wants {{"answer": {{"state": "Assam"}}, ...}}, your
+   final message should be exactly: {{"state": "Assam"}}
    Otherwise (a plain conversational question), just answer in plain text.
 """
+
+
+# Built once at import time from whatever TAVILY_API_KEY actually is --
+# kept in sync with _build_tools() below so the prompt never promises a
+# tool that isn't really offered (that mismatch is what caused Groq to
+# reject an undeclared "web_search" call with a 400 before this fix).
+SYSTEM_PROMPT = _build_system_prompt()
+
 
 # Tool definitions, in plain OpenAI "function" format -- just a dict, no
 # SDK-specific type to construct.
@@ -211,9 +246,14 @@ def _pace():
 
 
 def _call_model(messages, **kwargs):
-    """One Groq call, paced, with a single polite retry on 429 (rate
-    limited). If the retry also fails, the error is raised to the caller --
-    we deliberately don't keep hammering the API beyond that one extra try."""
+    """One Groq call, paced, with two narrow safety nets:
+      - a single polite retry on 429 (rate limited) -- not a retry storm.
+      - a single retry with tools turned OFF if the model tries to call a
+        tool that wasn't actually declared (a "tool_use_failed" 400). This
+        can happen if the system prompt and the real tool list ever drift
+        out of sync again -- instead of crashing the whole run, we force a
+        plain-text answer from whatever the model already knows.
+    If either safety net doesn't apply, the error is raised as-is."""
     _pace()
     try:
         return client.chat.completions.create(model=config.GROQ_MODEL, messages=messages, **kwargs)
@@ -221,6 +261,12 @@ def _call_model(messages, **kwargs):
         time.sleep(config.GROQ_RATE_LIMIT_RETRY_SECONDS)
         _pace()
         return client.chat.completions.create(model=config.GROQ_MODEL, messages=messages, **kwargs)
+    except BadRequestError as e:
+        if "tool_use_failed" in str(e) and "tools" in kwargs:
+            retry_kwargs = {k: v for k, v in kwargs.items() if k != "tools"}
+            _pace()
+            return client.chat.completions.create(model=config.GROQ_MODEL, messages=messages, **retry_kwargs)
+        raise
 
 
 def run_agent(history, log_fn, max_steps: int = 8):
