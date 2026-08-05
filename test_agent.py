@@ -250,5 +250,92 @@ class TestRunAgentEndToEnd(unittest.TestCase):
         self.assertIn("web_search", prompt)
 
 
+class TestExtractAnswerValue(unittest.TestCase):
+    def test_extract_nested_answer(self):
+        from utils import extract_answer_value
+        raw = '{"answer": {"answer": 30.0}}'
+        self.assertEqual(extract_answer_value(raw), 30.0)
+
+    def test_extract_nested_dict(self):
+        from utils import extract_answer_value
+        raw = '{"answer": {"state": "Assam"}}'
+        self.assertEqual(extract_answer_value(raw), {"state": "Assam"})
+
+    def test_extract_concatenated_json(self):
+        from utils import extract_answer_value
+        raw = '{"answer": 25.0}{"answer": 25.0}'
+        self.assertEqual(extract_answer_value(raw), 25.0)
+
+    def test_extract_code_fenced_json(self):
+        from utils import extract_answer_value
+        raw = "```json\n{\"answer\": 42}\n```"
+        self.assertEqual(extract_answer_value(raw), 42)
+
+    def test_extract_plain_text_and_tables(self):
+        from utils import extract_answer_value
+        raw = "| Metric | Value |\n|---|---|\n| Mean | 140 |"
+        self.assertEqual(extract_answer_value(raw), "| Metric | Value |\n|---|---|\n| Mean | 140 |")
+
+
+class TestBotWebhook(unittest.TestCase):
+    def setUp(self):
+        from fastapi.testclient import TestClient
+        import bot
+        self.bot = bot
+        self.client = TestClient(bot.app)
+
+    def test_health_endpoint(self):
+        resp = self.client.get("/")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["status"], "ok")
+        self.assertIn("mode", data)
+
+    @patch("bot.asyncio.create_task")
+    @patch("bot.Update.de_json")
+    def test_webhook_post_success(self, mock_de_json, mock_create_task):
+        mock_de_json.return_value = unittest.mock.MagicMock()
+        payload = {
+            "update_id": 10001,
+            "message": {
+                "message_id": 1,
+                "date": 1441645532,
+                "chat": {"id": 1021167690, "type": "private"},
+                "text": "2+2?",
+            },
+        }
+        resp = self.client.post("/webhook", json=payload)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"status": "ok"})
+        self.assertTrue(mock_create_task.called)
+
+    def test_webhook_secret_unauthorized(self):
+        with patch.object(self.bot.config, "WEBHOOK_SECRET", "super-secret-123"):
+            resp = self.client.post("/webhook", json={}, headers={"X-Telegram-Bot-Api-Secret-Token": "wrong-secret"})
+            self.assertEqual(resp.status_code, 401)
+            self.assertIn("Unauthorized", resp.json()["error"])
+
+
+class TestRealWorldQuestions(unittest.TestCase):
+    def test_easy_arithmetic_2_plus_2(self):
+        from utils import extract_answer_value
+        raw_llm_outputs = ['4', '{"answer": 4}', '{"answer": {"answer": 4}}']
+        for raw in raw_llm_outputs:
+            extracted = extract_answer_value(raw)
+            reply = {"answer": extracted, "log_url": "https://example.com/logs/1.jsonl"}
+            reply_json = json.dumps(reply, ensure_ascii=False)
+            self.assertIn('"answer": 4', reply_json)
+
+    def test_unicode_table_formatting(self):
+        from utils import extract_answer_value
+        table_text = "| Month | Change |\n|---|---|\n| Jan → Feb | 20% |\n| Price | ₹800 → ₹1,000 |"
+        extracted = extract_answer_value(table_text)
+        reply = {"answer": extracted, "log_url": "https://example.com/logs/1.jsonl"}
+        reply_json = json.dumps(reply, ensure_ascii=False)
+        self.assertIn("₹800", reply_json)
+        self.assertIn("Jan → Feb", reply_json)
+        self.assertNotIn(r"\u2192", reply_json)
+
+
 if __name__ == "__main__":
     unittest.main()

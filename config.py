@@ -28,40 +28,37 @@ def _require(name: str, fallback_env: str = None) -> str:
     return value
 
 
-TELEGRAM_BOT_TOKEN = _require("TELEGRAM_BOT_TOKEN")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "dummy-telegram-token")
 
-# Groq hosts open-weight models on fast custom chips, with a real
-# no-credit-card free tier -- console.groq.com/keys. Its API speaks the same
-# "chat completions" shape as OpenAI, so we talk to it with the standard
-# openai Python package, just pointed at Groq's URL (see agent.py).
-GROQ_API_KEY = _require("GROQ_API_KEY")
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
+# Groq hosts open-weight models on fast custom chips -- console.groq.com/keys.
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY") or os.environ.get("GEMINI_API_KEY") or "dummy-groq-key"
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
-# Free tier is ~30 requests/minute for this model (check your live number at
-# console.groq.com/settings/limits), and one question can trigger several
-# calls in a row (search -> download -> analyze -> answer). So instead of
-# firing calls as fast as possible and tripping that limit, agent.py waits
-# at least this many seconds between calls.
+# Free tier pacing
 GROQ_MIN_INTERVAL_SECONDS = float(os.environ.get("GROQ_MIN_INTERVAL_SECONDS", 2))
-
-# If we still hit a 429 (rate limited) despite pacing, wait this long once
-# and try that one call again. Just one polite retry -- not a retry storm.
 GROQ_RATE_LIMIT_RETRY_SECONDS = float(os.environ.get("GROQ_RATE_LIMIT_RETRY_SECONDS", 10))
 
-
-
-# Optional but recommended: free web search built for LLM agents, 1,000
-# searches/month free, no credit card -- tavily.com. If unset, the agent
-# simply won't be offered a web_search tool and will rely on URLs already
-# present in the question plus its own knowledge.
+# Optional Tavily key for web search
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
 
-# The public HTTPS URL your host gives this service, e.g.
-# https://your-app-name.onrender.com -- used to build each log_url.
-# For local testing this can be http://localhost:8000 (just won't be
-# publicly wget-able until you deploy).
-PUBLIC_BASE_URL = _require("PUBLIC_BASE_URL", fallback_env="BASE_URL").rstrip("/")
+# Public HTTPS URL (e.g. https://telegram-data-analyst-bot-ogij.onrender.com)
+PUBLIC_BASE_URL = (os.environ.get("PUBLIC_BASE_URL") or os.environ.get("BASE_URL") or "http://localhost:8000").rstrip("/")
+
+
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET")
+
+# Polling vs Webhook mode determination:
+# Default to polling only if explicitly requested OR if PUBLIC_BASE_URL is localhost / 127.0.0.1.
+# On Render (where PUBLIC_BASE_URL is https://telegram-data-analyst-bot-ogij.onrender.com),
+# this automatically resolves to False (Webhook mode).
+_use_polling_env = os.environ.get("USE_POLLING", "").strip().lower()
+if _use_polling_env in ("true", "1", "yes"):
+    USE_POLLING = True
+elif _use_polling_env in ("false", "0", "no"):
+    USE_POLLING = False
+else:
+    USE_POLLING = "localhost" in PUBLIC_BASE_URL or "127.0.0.1" in PUBLIC_BASE_URL
 
 LOG_DIR = os.environ.get("LOG_DIR", "logs")
 PORT = int(os.environ.get("PORT", 8000))

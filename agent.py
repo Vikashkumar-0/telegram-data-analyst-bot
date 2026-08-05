@@ -85,14 +85,11 @@ Rules:
    run_python_analysis call rather than several small ones whenever you can.
 7. Only ever call a tool from the list you were given. If you're not sure
    something is available, don't call it -- answer with what you have.
-8. If the question specifies an exact JSON output shape (as data-analysis
-   questions here typically do, e.g. {{"answer": {{"state": "<state name>"}},
-   "log_url": "..."}}), your final message must be ONLY the raw JSON value
-   for the "answer" key -- no markdown, no code fences, no explanation, no
-   surrounding object, no "log_url" (the system adds that separately).
-   Example: if the question wants {{"answer": {{"state": "Assam"}}, ...}}, your
-   final message should be exactly: {{"state": "Assam"}}
-   Otherwise (a plain conversational question), just answer in plain text.
+8. If the question specifies an output schema (e.g. {{"answer": {{"state": "<state name>"}}, "log_url": "..."}}),
+   your final message should be ONLY the target value for the "answer" field (e.g. {{"state": "Assam"}}, 30.0, or tabular text).
+   Do NOT wrap your final message in an outer {{"answer": ...}} dict or duplicate JSON lines, as the system adds the outer
+   wrapper and log_url automatically.
+
 """
 
 
